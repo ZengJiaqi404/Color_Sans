@@ -1,0 +1,42 @@
+# ---- 模型权重（体积大，按 README 自行放入 weights/）----
+weights/*
+!weights/.gitkeep
+
+# ---- 原始视频与推理结果视频（作业要求的附件，不进入 Git 历史）----
+videos/*
+!videos/.gitkeep
+runs/*
+!runs/.gitkeep
+docs/*.mp4
+docs/*.avi
+docs/*.mov
+
+# ---- Python 虚拟环境 ----
+.venv/
+venv/
+env/
+ENV/
+
+# ---- Python 缓存与构建产物 ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+
+# ---- 本地环境/临时文件（DSH 沙箱补丁、ultralytics 配置、临时目录、日志）----
+.sandbox-tools/
+.ultralytics/
+.tmp/
+_probe2/
+*.log
+
+# ---- 编辑器与系统文件 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
