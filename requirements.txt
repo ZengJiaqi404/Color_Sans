@@ -1,0 +1,9 @@
+# 运行时依赖（CPU 环境）
+# torch / torchvision 建议先按 PyTorch 官方 CPU 源单独安装（体积大且能避免误装 CUDA 版）：
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+# 若使用 NVIDIA GPU，请改为官方对应 CUDA 版本的安装命令，详见 README。
+ultralytics>=8.4.0
+opencv-python>=4.9.0
+numpy>=1.24.0
+torch>=2.4.0
+torchvision>=0.19.0
