@@ -1,308 +1,225 @@
-# Color_Sans
+# YOLO 模型导出、推理与性能对比
 
-RoboMaster 装甲板视频推理与关键点可视化（YOLO26n-pose / Ultralytics）。
+把上一份作业的 RoboMaster 装甲板模型（YOLO26n-pose，`.pt`）导出为 **ONNX** 与 **TorchScript**，
+用**同一套推理代码、同一段视频、同一组阈值**跑推理，再在**同一台机器**上量化对比
+模型大小、加载耗时、推理耗时与检测结果。
 
-本仓库实现「使用指定模型完成推理与可视化」的作业要求：加载课程提供的 YOLO26n 装甲板权重 `best.pt`，
-对**自行拍摄的视频**逐帧推理，在结果视频中画出**检测框、类别、置信度和模型预测的 4 个关键点**，
-并输出可正常播放的结果视频。
+- 详细数据与分析：[`comparison.md`](comparison.md)
+- 一句话结论：**ONNX 在 CPU 上比 PyTorch 快 1.67×，且结果零损失；TorchScript 反而慢 20%。**
 
 ---
 
-## 1. 项目完成的功能
+## 1. 本次使用的 YOLO 模型版本
 
-| 功能 | 说明 |
+| 项 | 值 |
 | --- | --- |
-| 加载模型权重 | 通过 `--weights` 指定 `best.pt`，启动时打印任务类型、类别名、关键点形状 |
-| 读取自己拍摄的视频 | 通过 `--source` 指定，支持 MP4 / MOV / AVI / WebM 等 OpenCV 可解码格式；也支持单张图片 |
-| 视频推理 | 逐帧 `model.predict()`，CPU / GPU 均可（`--device`），不要求实时 |
-| 目标可视化 | 每个目标绘制：检测框、`类别 + 置信度` 标签、**4 个关键点**（带编号 1–4、与检测框同色，便于看出归属） |
-| 关键点连线 | 默认 `--skeleton hull`：按 4 个预测点的凸包描出装甲板轮廓；也可 `order`（按关键点顺序）或 `none`（只画点） |
-| 保存结果视频 | 分辨率、帧率与源视频一致，一帧对一帧，`mp4v` 编码，可直接播放 |
-| 检测明细（可选） | `--save-txt`：每帧每个目标的框坐标与 4 个关键点坐标写入 txt |
-| 运行报告（可选） | `--report-json`：记录权重、参数、模型信息、帧数、检出帧数、置信度统计、关键点总数、耗时与 FPS |
-| 无检测自检 | 全片无检测时自动保存首帧用于排查，并打印排查清单（权重 / 视频 / 阈值 / imgsz / 设备） |
+| 模型 | `YOLO26n-pose`（上一份作业训练好的装甲板权重 `best.pt`） |
+| 规模 | 2,704,788 参数（融合后 2,447,934），5.6 GFLOPs，129 层 |
+| 任务 | `pose`（检测框 + 4 关键点） |
+| 类别 | `{0: B1, 1: B2, 2: B3, 3: R1, 4: R2, 5: R3}` |
+| 关键点 | `kpt_shape=[4, 2]`，即 4 个点、只有 (x, y)、无关键点置信度 |
+| 推理框架 | ultralytics **8.4.188** |
+| 原始权重 | `models/best.pt`（5.62 MB，已入库） |
 
-关键点**全部来自模型输出** `Results.keypoints`，没有用检测框四角代替；代码中也没有任何关键点后处理。
-
----
-
-## 2. Python 版本、主要依赖、CPU 还是 GPU
-
-- **Python 版本：3.13.14**（Windows 11 实测）
-- **运行设备：CPU**（本次作业实测全部使用 CPU；代码不依赖 GPU，但有 GPU 时可用 `--device 0` 加速）
-- **主要依赖（实测版本）**
-
-| 依赖 | 版本 | 作用 |
-| --- | --- | --- |
-| torch | 2.14.1+cpu | 推理后端 |
-| torchvision | 0.29.1+cpu | ultralytics 依赖 |
-| ultralytics | 8.4.176 | YOLO 模型加载与推理 |
-| opencv-python | 5.0.0.93 | 视频读写与绘制 |
-| numpy | 2.5.2 | 数值处理 |
-
-模型元数据（`infer.py` 启动时打印，可用来自查权重是否正确）：
-
-```
-任务=pose
-类别={0: 'B1', 1: 'B2', 2: 'B3', 3: 'R1', 4: 'R2', 5: 'R3'}
-关键点形状=[4, 2]
-```
-
-即：6 类（红/蓝方 1、2、3 号装甲板），每个目标 4 个关键点，关键点为 `(x, y)` 两个分量，
-**该权重不输出每个关键点的置信度**（详见第 7 节问题 1）。
-
----
-
-## 3. 模型权重的准备方式与放置位置
-
-权重体积较大，**不进入 Git 历史**（已在 `.gitignore` 中排除），需要自行放入：
-
-1. 取得作业提供的模型权重文件 `best.pt`（yolo26n-pose 装甲板模型，约 5.9 MB）。
-2. 在仓库根目录新建 `weights/` 目录，把文件放成：
-
-```
-weights/best.pt
-```
-
-3. 若放在别处，运行 `infer.py` 时用 `--weights` 指定即可，例如
-   `--weights D:\models\best.pt`。
-
-自查权重是否加载正确（无需视频）：
+模型元数据可以随时用下面这条命令复核：
 
 ```bash
-python infer.py --source 任意一张图片.jpg --weights weights/best.pt
+python -c "from ultralytics import YOLO; m=YOLO('models/best.pt'); print(m.task, m.names, m.model.kpt_shape)"
+# → pose {0: 'B1', 1: 'B2', 2: 'B3', 3: 'R1', 4: 'R2', 5: 'R3'} [4, 2]
 ```
 
-启动日志中的 `任务 / 类别 / 关键点形状` 与第 2 节一致即说明权重正确。
+## 2. 导出的模型格式与导出方法
 
----
-
-## 4. 依赖安装步骤、实际运行命令、结果保存位置
-
-### 4.1 安装依赖
+导出脚本：[`export.py`](export.py)（同时支持 onnx / torchscript / engine / openvino 等 ultralytics 格式）
 
 ```bash
-# 1) 创建并激活虚拟环境（虚拟环境不入库）
-python -m venv .venv
-.venv\Scripts\activate            # Windows
-# source .venv/bin/activate       # Linux / macOS
-
-# 2) 安装 CPU 版 torch（体积大，建议单独指定官方 CPU 源，避免误装 CUDA 版）
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-
-# 3) 安装其余依赖
-pip install -r requirements.txt
+python export.py --weights models/best.pt --formats onnx torchscript --imgsz 640 --opset 12
 ```
 
-> 使用 NVIDIA GPU 时：把第 2 步换成 PyTorch 官网对应 CUDA 版本的安装命令
-> （例如 `pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128`），
-> 运行时加 `--device 0`。
->
-> 国内网络较慢时可加镜像，例如 `-i https://pypi.tuna.tsinghua.edu.cn/simple`。
+| 格式 | 产物 | 大小 | 导出耗时 | 关键参数 |
+| --- | --- | --- | --- | --- |
+| ONNX | `models/best.onnx` | 9.72 MB | 2.79 s | `opset=12`，`simplify=True`（onnxslim 简化），静态 batch/尺寸 |
+| TorchScript | `models/best.torchscript` | 9.95 MB | 0.77 s | `torch.jit.trace` 轨迹图 |
 
-### 4.2 实际运行命令（本次作业实测使用）
+导出结果的自查（`export.py` 会写进 `results/export_report.json`）：
 
-```bash
-python infer.py ^
-  --weights weights/best.pt ^
-  --source videos/d414.mp4 ^
-  --output runs/d414_result.mp4 ^
-  --device cpu --imgsz 640 --conf 0.25 ^
-  --save-txt --report-json runs/d414_report.json
+```
+输入：images[1, 3, 640, 640]
+输出：output0[1, 18, 8400]      # 18 = 4(框) + 6(类别) + 4×2(关键点)
+ONNX 图：397 个节点，241 个初始化张量，opset ai.onnx=12
 ```
 
-### 4.3 结果保存位置
+> 为什么体积反而变大？三个格式都是 fp32 精度，变大是因为 `.pt` 是 zip 压缩存储（5.89 MB），
+> 而 ONNX/TorchScript 默认不压缩，文件大小≈权重原始字节数（约 10 MB）。
 
-| 产物 | 路径 | 是否入库 |
-| --- | --- | --- |
-| 结果视频 | `runs/d414_result.mp4` | 否 |
-| 检测明细 | `runs/d414_detections.txt` | 否 |
-| 运行报告 | `runs/d414_report.json` | 否 |
-| 结果截图 | `docs/*.png` | **是** |
+## 3. 运行环境与依赖库
 
-输出路径可用 `--output` 任意指定；不给 `--output` 时默认写到 `runs/<源文件名>_result.mp4`。
-
-### 4.4 常用参数
-
-| 参数 | 默认值 | 说明 |
-| --- | --- | --- |
-| `--weights` | `weights/best.pt` | 模型权重路径 |
-| `--source` | `videos/d414.mp4` | 输入视频或图片路径 |
-| `--output` | `runs/<源名>_result.mp4` | 结果视频/图片保存路径 |
-| `--device` | `cpu` | `cpu` 或 `0`（GPU） |
-| `--imgsz` | `640` | 推理输入尺寸 |
-| `--conf` | `0.25` | 置信度阈值 |
-| `--iou` | `0.7` | NMS IoU 阈值 |
-| `--max-det` | `30` | 单帧最大检测数 |
-| `--kpt-conf` | `0.0` | 关键点置信度显示阈值（低于阈值画空心；本权重无关键点置信度，该参数不生效） |
-| `--skeleton` | `hull` | 关键点连线：`hull` / `order` / `none` |
-| `--line-width` / `--kpt-radius` / `--font-scale` | `2` / `5` / `0.6` | 绘制样式 |
-| `--no-hud` | 关闭 | 不显示左上角信息面板 |
-| `--max-frames` | `0` | 只处理前 N 帧（0 = 整段），用于快速自检 |
-| `--codec` | `mp4v` | 输出编码，打不开时自动回退 XVID(`.avi`) |
-| `--show` | 关闭 | 实时弹窗预览（按 q 退出） |
-| `--save-txt` / `--report-json` | 关闭 | 输出检测明细 / 统计报告 |
-
-模型路径、视频路径、输出位置都在命令行参数里，无需改代码。
-
----
-
-## 5. 视频拍摄地点、时长及场景说明
-
-- **拍摄地点**：D414 实验室（室内水泥地面，有顶部照明）
-- **视频格式**：手持拍摄，1920×1080、30.006 FPS、HEVC 编码、12.3 MB（文件名 `video_20261012_215837..mp4`）
-- **时长**：8.80 秒，共 264 帧
-- **场景说明**：拍摄对象为一台 RoboMaster 步兵机器人（蓝方，装甲板上可见数字“3”），
-  镜头与机器人之间存在相对运动，画面中包含：
-  - 机器人两侧的装甲板（不同角度、不同远近，部分帧存在运动模糊）；
-  - 第 111 帧等处画面边缘远处还有一块小尺寸装甲板，用于观察小目标检出情况。
-- **原始视频放置位置**：`videos/d414.mp4`（不入库，需自行放入）
-
----
-
-## 6. 能展示检测框和关键点的代表性结果截图
-
-结果视频第 111 帧（画面清晰，同时检出 3 个目标：B3 0.88、B3 0.57、B1 0.28）：
-
-![第 111 帧结果](docs/result_frame_0111.png)
-
-关键点细节放大（左上 1 → 左下 2 → 右下 3 → 右上 4，轮廓贴合装甲板四角，
-关键点与检测框同色、带编号，可清楚看出每个点属于哪个目标）：
-
-![关键点放大](docs/keypoints_zoom_frame0111.png)
-
-第 3 帧（同一辆车的两块“3”号装甲板被分别判为 B3 0.32 与 B2 0.32，属低置信度下的类别混淆，
-保留真实结果作为记录）：
-
-![第 3 帧结果](docs/result_frame_0003.png)
-
----
-
-## 7. 实际识别表现、遇到的问题及处理方法
-
-### 7.1 实际识别表现（`runs/d414_report.json` 实测）
-
-| 指标 | 数值 |
+| 项 | 值 |
 | --- | --- |
-| 处理帧数 | 264 / 264（全片） |
-| 检出目标的帧数 | 261（3 帧无检测：第 23、140、149 帧） |
-| 检测目标总数 | 387 |
-| 每帧检测数分布 | 1 个：154 帧；2 个：88 帧；3 个：19 帧 |
-| 关键点总数 | 1548（= 387 × 4，**每个目标都恰好 4 个关键点，无缺失**） |
-| 检测框平均置信度 | 0.688（最低 0.251，中位 0.773，最高 0.895） |
-| 置信度 ≥ 0.8 / < 0.4 | 180 个 / 61 个 |
-| 耗时 | 13.68 s（CPU，含读写视频；纯推理约 19.3 FPS） |
-| 结果视频 | 1920×1080、30.006 FPS、264 帧、mp4v，与源视频一一对应 |
+| 操作系统 | Windows 11 |
+| CPU | Intel Core 7 245HX（14 线程，基准固定 8 线程） |
+| GPU | NVIDIA RTX 5060 Laptop（sm_120），仅用于附加测试 |
+| Python | 3.13.14 |
+| torch / torchvision | 2.14.1+cu130 / 0.29.1+cu130（CPU 推理为主） |
+| ultralytics | 8.4.188 |
+| onnx / onnxslim / onnxruntime | 1.23.2 / 0.1.98 / 1.31.1（`CPUExecutionProvider`） |
+| opencv-python / numpy | 5.0.0 / 2.5.2 |
 
-分类别表现：
-
-| 类别 | 检出次数 | 平均置信度 | 置信度范围 |
-| --- | --- | --- | --- |
-| B3 | 316 | 0.731 | 0.251 – 0.895 |
-| B2 | 65 | 0.513 | 0.266 – 0.766 |
-| B1 | 6 | 0.273 | 0.256 – 0.315 |
-
-**现象记录（未做任何"挑好看的帧"处理）：**
-
-1. 主体装甲板识别稳定：B3 板在多角度下都能稳定检出，多数帧置信度 0.6 以上，关键点落在装甲板四角。
-2. **低置信度下的类别混淆**：第 3 帧两块都印着"3"的装甲板被判为 `B3 0.32` 与 `B2 0.32`，
-   其中一块应为 B3。这类错误集中在置信度 0.25–0.40 区间（全片 61 个低置信度目标）。
-3. **小目标检出偏弱**：B1 全片仅 6 次，置信度 0.256–0.315，出现在画面边缘、面积很小的远处装甲板上。
-4. **漏检 3 帧**（23、140、149）：均为运动模糊明显的帧。
-
-以上现象只做记录，未通过调参掩盖；`.gitignore` 排除的 `runs/d414_detections.txt`
-保留了每帧每个目标的框与关键点坐标，可逐条复核。
-
-### 7.2 遇到的问题及处理方法
-
-**问题 1：该权重不输出关键点置信度。**
-`kpt_shape=[4, 2]`，即关键点只有 `(x, y)`，`Results.keypoints.conf` 为 `None`。
-如果按"置信度过滤"来画点，4 个关键点会被全部丢掉。
-处理：绘制逻辑不依赖关键点置信度，`conf` 为 `None` 时按可见处理，保证**4 个点全部画出并编号**；
-`--kpt-conf` 的空心标记只对带置信度的模型生效；报告中 `mean_kpt_conf` 为 `null` 属正常现象。
-
-**问题 2：关键点顺序与连线。**
-实测该权重的关键点顺序为「左上 → 左下 → 右下 → 右上」，按顺序连线正好是装甲板轮廓；
-但为了不依赖具体权重的顺序约定，默认用 `--skeleton hull`（对 4 个预测点求凸包再描边），
-效果等价且更稳；需要严格按模型顺序连线时用 `--skeleton order`。
-
-**问题 3：检测明细里关键点为空（已修复）。**
-最初写 txt 时用 `zip(kxy, kcf)`，而 `kcf` 在本权重下为 `None`，导致文本里的 `kpts=[]` 为空，
-但视频里的关键点是正常画出的（两者用了不同代码路径）。
-处理：抽出 `kpt_pairs()` 统一处理 `conf=None` 的情况，现在 txt 中每个目标都记录 4 个点，
-报告中 `keypoints_per_target` 为 4.0，可反向校验。
-
-**问题 4：ultralytics 首次导入时因配置目录无写权限而报错。**
-`ultralytics` 会在 `%APPDATA%\Ultralytics` 创建配置文件，若该目录无写权限，
-导入阶段直接抛 `PermissionError`。
-处理：把配置目录指到有写权限的位置即可（本次实测即如此）：
+安装：
 
 ```bash
-set YOLO_CONFIG_DIR=D:\path\to\writable\dir     # Windows
-export YOLO_CONFIG_DIR=/path/to/writable/dir    # Linux / macOS
-```
-
-**问题 5：视频编码兼容性。**
-源视频为 HEVC，OpenCV 可正常解码；输出默认用 `mp4v`（Windows 播放器 / VLC / 浏览器均可播放）。
-若某些环境没有对应编码器，脚本会自动回退到 `XVID` 并输出 `.avi`，保证结果视频一定能播放。
-
-**问题 6：全片没有有效检测时的排查流程。**
-脚本内建了自检：当 `detections_total == 0` 时，会把源视频首帧保存为
-`runs/<源名>_first_frame.jpg` 并打印排查清单。排查顺序为：
-① 权重是否为本次任务的 `best.pt`（看启动打印的 任务/类别/关键点形状）；
-② 视频能否正常播放、内容是否为装甲板；
-③ 降低阈值 `--conf 0.10`；
-④ 提高输入尺寸 `--imgsz 960`；
-⑤ 确认 `--device` 可用。
-本次实测未触发该分支（261/264 帧均有检出）。
-
----
-
-## 8. 文件结构
-
-```
-Color_Sans/
-├── infer.py                     # 推理与可视化脚本（唯一入口）
-├── requirements.txt             # 依赖说明
-├── README.md                    # 本文件
-├── .gitignore                   # 排除权重 / 视频 / 结果 / 虚拟环境
-├── docs/                        # 结果截图（入库）
-│   ├── result_frame_0003.png
-│   ├── result_frame_0111.png
-│   └── keypoints_zoom_frame0111.png
-├── weights/                     # 放入 best.pt（不入库）
-├── videos/                      # 放入自行拍摄的原始视频（不入库）
-└── runs/                        # 结果视频、检测明细、报告（不入库）
-```
-
-## 9. 仓库不包含哪些文件、如何准备
-
-`.gitignore` 已排除**模型权重、原始视频、结果视频、虚拟环境**，避免大文件进入 Git 历史：
-
-| 被排除的内容 | 需要自行准备的方式 |
-| --- | --- |
-| `weights/*.pt` | 从课程材料取得 `best.pt`，放入 `weights/` |
-| `videos/*` | 自行拍摄的原始视频，放入 `videos/`（本次为 D414 实验室拍摄的 8.8 s 视频） |
-| `runs/*` | 运行 `infer.py` 后自动生成（结果视频、明细、报告） |
-| `.venv/` | 按第 4.1 节创建虚拟环境 |
-
-因为权重与原始视频不入库，**克隆仓库后必须按第 3、5 节补齐这两个文件，再执行第 4.2 节命令**，
-即可复现上面的结果视频与统计数字。
-
-## 10. 完整复现步骤
-
-```bash
-git clone https://github.com/ZengJiaqi404/Color_Sans.git
-cd Color_Sans
-git checkout feat/yolo-inference
-
 python -m venv .venv
 .venv\Scripts\activate
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130   # 或 /cpu
+pip install -r requirements.txt
+```
+
+## 4. 模型推理的具体运行命令
+
+推理脚本 [`inference.py`](inference.py) 用 `--model` 切换格式，其余参数、绘制逻辑、统计口径完全一致：
+
+```bash
+# 原始 PyTorch 权重
+python inference.py --model models/best.pt         --source assets/d414.mp4 --output results/best_pt_result.mp4
+
+# ONNX
+python inference.py --model models/best.onnx       --source assets/d414.mp4 --output results/best_onnx_result.mp4
+
+# TorchScript
+python inference.py --model models/best.torchscript --source assets/d414.mp4 --output results/best_torchscript_result.mp4
+```
+
+性能与一致性对比（预热 + 多轮重测，会自动生成 `results/benchmark.json` / `benchmark.md`）：
+
+```bash
+python benchmark.py --models models/best.pt models/best.onnx models/best.torchscript \
+                    --frames 120 --repeats 3 --warmup 10 --threads 8
+```
+
+分析脚本（定位差异来源，详见 `comparison.md` §5）：
+
+```bash
+python tools/forward_bench.py        # 纯前向 vs 含前后处理，拆解框架开销
+python tools/compare_raw_output.py   # 同一输入张量下三个后端的原始输出差异
+python tools/compare_preprocess.py   # 三个后端实际喂进网络的输入张量形状
+```
+
+常用参数：`--device 0`（GPU）、`--imgsz 640`、`--conf 0.25`、`--iou 0.7`、
+`--rect`（允许 stride 对齐的最小填充，默认关闭以保证各格式输入一致）、`--max-frames N`。
+
+## 5. 原始模型与导出模型的推理结果截图
+
+同一帧（第 111 帧），ONNX 结果（三个格式的检出完全一致）：
+
+![ONNX 推理结果](docs/result_frame0111_onnx.png)
+
+关键点细节（检测框 + 类别 + 置信度 + 4 个编号关键点）：
+
+![关键点细节](docs/keypoints_zoom_frame0111.png)
+
+**输入尺寸陷阱的直观证据**（左：`.pt` 默认 `rect=True`，384×640 输入，多检出左上角 `B1 0.28`；
+右：ONNX，640×640 输入，该处无检出）：
+
+![输入尺寸差异](docs/compare_input_size_frame0111.png)
+
+> 结果视频（`results/*_result.mp4`）体积较大未入库，按 §4 的命令即可重新生成；
+> 三种格式在统一输入尺寸下逐目标一致（IoU=1.0），肉眼看不出差别。
+
+## 6. 模型大小、推理耗时及检测效果对比
+
+CPU、8 线程、120 帧、`imgsz=640`、统一 **640×640** 方形输入、预热 10 帧后 3 轮取平均：
+
+| 模型格式 | 文件大小 | 加载耗时 | 推理耗时 | 吞吐 | 检测数量 | 检测效果 |
+| --- | --- | --- | --- | --- | --- | --- |
+| PyTorch `.pt` | 5.62 MB | 93.3 ms | 60.79 ms/帧 | 16.45 FPS | 173 | 基准 |
+| **ONNX `.onnx`** | 9.72 MB | **4.4 ms** | **36.46 ms/帧** | **27.43 FPS** | 173 | 与 .pt 完全一致 |
+| TorchScript `.torchscript` | 9.95 MB | 30.7 ms | 72.87 ms/帧 | 13.72 FPS | 173 | 与 .pt 完全一致 |
+
+全片 264 帧的一致性核验：ONNX / TorchScript 相对 `.pt` 的 **IoU 均值 = 1.0、未匹配框 0 个、
+类别翻转 0 次、关键点差 0.0 px、置信度差 0.0**，三种格式都是 378 个目标（B2 70、B3 308）。
+
+完整表格、每轮明细、GPU 附加数据与原因分析见 [`comparison.md`](comparison.md)。
+
+## 7. 实验过程中遇到的问题及解决方法
+
+| 序号 | 问题现象 | 原因 | 解决方法 |
+| --- | --- | --- | --- |
+| 1 | 导出的模型比 `.pt` 大 1.7 倍 | `.pt` 是 zip 压缩存储，ONNX/TorchScript 不压缩；精度没变 | 无需处理，只需知道"体积大 ≠ 精度高" |
+| 2 | 一开始对比得出"导出后掉精度、PyTorch 更快"的错误结论 | `.pt` 默认 `rect=True`（stride 对齐）→ 输入 384×640；静态图只能 640×640，**两者实际输入不同** | 统一 `rect=False` 强制方形输入后，三种格式结果完全一致、速度排名也反转 |
+| 3 | 同一配置多次测出的耗时波动很大（ONNX 74 ms vs 104 ms） | ultralytics 会改动 torch 线程数；未固定线程时 ORT 在 14 核混合架构上线程争抢 | `benchmark.py --threads 8` 同时固定 torch 与 `OMP_NUM_THREADS`，并跑两遍复测（偏差 <1.5 ms） |
+| 4 | 端到端 ONNX 起初比 PyTorch 还慢 | 非 torch 后端的解码/NMS 走 numpy 实现，`predict` 里有约 +44 ms 框架开销 | 用 `tools/forward_bench.py` 拆开计时定位；纯前向 ONNX 其实最快（32.7 ms vs 41.9 ms） |
+| 5 | 在受控环境里 `pip install` 反复失败（`PermissionError`，临时目录进不去） | 以"仅所有者"权限模式创建的临时目录权限损坏，pip 解包目录不可写 | 把 `TEMP`/`TMP` 指到可写目录，并用 `sitecustomize.py` 放宽 `os.mkdir`/`os.open` 的权限位 |
+| 6 | GPU 只有两种格式可比 | 安装的 `onnxruntime` 只有 `CPUExecutionProvider`；GPU 版需 `onnxruntime-gpu` 且 CUDA 版本对齐 | 明确标注 GPU 只测 torch 系格式；主表全部在 CPU 上完成，保证同硬件可比 |
+
+## 8. 对不同模型格式的理解与实验结论
+
+**三种格式到底差在哪**（细节见 `comparison.md` §5）：
+
+| 维度 | PyTorch `.pt` | ONNX | TorchScript |
+| --- | --- | --- | --- |
+| 本质 | Python 序列化的模型对象（含训练元数据） | 与框架无关的计算图（protobuf + opset 版本） | PyTorch 自己的轨迹图（绑定 torch 版本） |
+| 运行依赖 | ultralytics + torch | onnxruntime（C++/C#/Java/JS/移动端都有） | libtorch（C++） |
+| 跨语言部署 | 差 | **最好** | 一般 |
+| 图优化 | eager 逐算子执行（仅 Conv+BN 融合） | **ORT_ENABLE_ALL 融合/常量折叠/内核选择** | 只记录算子序列，无额外优化 |
+| CPU 速度 | 60.79 ms | **36.46 ms** | 72.87 ms |
+| 适合 | 训练、调试、快速验证 | **生产部署** | 已有 libtorch 工程 |
+
+**结论**：
+
+1. **导出是无损的**：统一输入尺寸后，ONNX / TorchScript 与 `.pt` 逐目标一致（IoU=1.0，关键点 0 px 差）。
+   之前的"掉精度"是输入尺寸不一致造成的假象。
+2. **ONNX 是这个模型在 CPU 上的最优选择**：快 1.67×，加载快 20 倍，还能脱离 Python 生态部署。
+3. **TorchScript 不等于更快**：它解决的是"不依赖 Python"，不是性能；trace 出来的图不会做 Conv+BN 融合，
+   实测比 eager 慢约 20%。
+4. **对比实验的第一原则是"对齐输入"**：同一个 `imgsz` 参数在不同后端可能对应不同张量形状
+   （384×640 vs 640×640，相差 40% 像素），不对齐就没有可比性。
+5. **小模型上 GPU 收益有限**：5.6 GFLOPs 的模型，GPU（RTX 5060）只比 CPU 快约 3×，
+   因为端到端时间被预处理、后处理、数据搬运摊薄——边缘部署时"ONNX + CPU"经常更划算。
+
+---
+
+## 目录结构
+
+```
+YOLO-Export-Inference/
+├── README.md                # 本文件
+├── requirements.txt         # 依赖
+├── .gitignore
+├── comparison.md            # 完整对比数据与原因分析
+├── export.py                # 模型导出（onnx / torchscript / ...）
+├── inference.py             # 多格式推理 + 可视化（结果视频 + 统计报告）
+├── benchmark.py             # 多格式性能基准（预热 + 多轮 + 一致性校验）
+├── tools/
+│   ├── forward_bench.py     # 纯前向 vs 含前后处理，拆解框架开销
+│   ├── compare_raw_output.py    # 同一输入下三后端原始输出对比
+│   └── compare_preprocess.py    # 三后端实际输入张量形状对比
+├── models/                  # 已入库：best.pt / best.onnx / best.torchscript
+├── results/                 # 已入库：report/benchmark 的 json 与 md；mp4 视频不入库
+├── docs/                    # 已入库：结果截图
+└── assets/                  # 测试视频（不入库，需自行放入 d414.mp4）
+```
+
+## 复现步骤
+
+```bash
+git clone <本仓库地址> && cd YOLO-Export-Inference
+python -m venv .venv && .venv\Scripts\activate
 pip install -r requirements.txt
 
-# 放入 weights/best.pt 与 videos/d414.mp4 后：
-python infer.py --weights weights/best.pt --source videos/d414.mp4 ^
-                --output runs/d414_result.mp4 --device cpu ^
-                --save-txt --report-json runs/d414_report.json
+# 1) 导出（models/ 里已含导出产物，可跳过；重跑会覆盖）
+python export.py --weights models/best.pt --formats onnx torchscript --imgsz 640 --opset 12
+
+# 2) 准备测试视频（与上一份作业同一段 D414 视频，未入库）
+#    assets/d414.mp4
+
+# 3) 三种格式推理，输出结果视频与统计
+python inference.py --model models/best.pt
+python inference.py --model models/best.onnx
+python inference.py --model models/best.torchscript
+
+# 4) 性能对比（生成 results/benchmark.json 与 benchmark.md）
+python benchmark.py --threads 8 --frames 120 --repeats 3
 ```
+
+模型文件已直接入库（`.pt` 5.62 MB、`.onnx` 9.72 MB、`.torchscript` 9.95 MB，单个均远小于
+GitHub 100 MB 限制），因此**不需要 Git LFS**，克隆后即可离线复现。
